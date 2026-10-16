@@ -2,6 +2,8 @@
 
 Your iPhone screen in a Simulator-style window on your Mac, over Wi-Fi. View only, and it works in the EU.
 
+<img src="docs/screenshot.png" alt="VibeMirror showing an iPhone's App Library in a device frame" width="320">
+
 Apple's iPhone Mirroring is not available in the European Union. VibeMirror does something smaller: it is an AirPlay receiver that shows your iPhone or iPad inside a device frame, plays its audio on the Mac, and takes screenshots. You can't click or type into the phone.
 
 ## Use
