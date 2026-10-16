@@ -19,19 +19,26 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_airplay._tcp</string>
+		<string>_raop._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>macOS treats a USB-connected iPhone as a camera. VibeMirror needs this to show your iPhone screen.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>MIT License. VibeLabs.</string>
-	<key>NSCameraUsageDescription</key>
-	<string>macOS treats a USB-connected iPhone as a camera. VibeMirror needs this to show your iPhone screen.</string>
+	<string>GPL-3.0. VibeLabs.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>VibeMirror shows up as an AirPlay receiver so your iPhone can mirror its screen to this Mac.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>VibeMirror plays your iPhone's audio on this Mac while mirroring.</string>
 </dict>

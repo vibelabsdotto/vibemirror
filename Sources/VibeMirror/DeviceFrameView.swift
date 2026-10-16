@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 
 /// Draws the device chrome and hosts the live preview layer inside the screen cutout.
 final class DeviceFrameView: NSView {
@@ -7,11 +6,13 @@ final class DeviceFrameView: NSView {
         didSet { if geometry != oldValue { needsLayout = true } }
     }
 
-    var previewLayer: AVCaptureVideoPreviewLayer? {
+    /// Live video (capture preview or decoded AirPlay stream), clipped to the screen.
+    var contentLayer: CALayer? {
         didSet {
+            guard contentLayer !== oldValue else { return }
             oldValue?.removeFromSuperlayer()
-            if let previewLayer { screenLayer.insertSublayer(previewLayer, at: 0) }
-            messageLayer.isHidden = previewLayer != nil
+            if let contentLayer { screenLayer.insertSublayer(contentLayer, at: 0) }
+            messageLayer.isHidden = contentLayer != nil
             needsLayout = true
         }
     }
@@ -100,7 +101,7 @@ final class DeviceFrameView: NSView {
 
         screenLayer.frame = convert(g.screen)
         screenLayer.cornerRadius = g.screenCornerRadius * scale
-        previewLayer?.frame = screenLayer.bounds
+        contentLayer?.frame = screenLayer.bounds
 
         let short = min(screenLayer.bounds.width, screenLayer.bounds.height)
         let textInset = screenLayer.bounds.width * 0.12

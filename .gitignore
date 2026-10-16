@@ -5,3 +5,4 @@ build/
 .hermes/
 .agents/
 skills-lock.json
+.deps/

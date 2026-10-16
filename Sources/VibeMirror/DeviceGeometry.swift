@@ -100,6 +100,8 @@ struct DeviceGeometry: Equatable {
         }
     }
 
+    var screenShortSide: CGFloat { min(screenSize.width, screenSize.height) }
+
     /// Scale that maps device pixels to view points for a given container size.
     func fitScale(in size: CGSize) -> CGFloat {
         min(size.width / bounds.width, size.height / bounds.height)

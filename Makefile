@@ -12,9 +12,16 @@ SIGN_IDENTITY ?= Developer ID Application
 # JSON with apple_key_id, apple_issuer_id, apple_key_path (App Store Connect API key).
 NOTARY_CONFIG ?= $(HOME)/VibeLabs/mobile-app-release-config/max_dev_config.json
 
-.PHONY: build app run list icon release publish clean
+.PHONY: deps build app run list icon release publish clean
 
-build:
+DEPS := .deps/lib/libcrypto.a .deps/lib/libplist-2.0.a
+
+# Static universal OpenSSL (libcrypto) and libplist for the AirPlay receiver.
+deps: $(DEPS)
+$(DEPS):
+	scripts/build-deps.sh
+
+build: $(DEPS)
 	swift build
 
 # Debug app bundle, ad-hoc signed. macOS asks for camera access again after each rebuild.
@@ -43,7 +50,7 @@ icon:
 	iconutil -c icns $(BUILD_DIR)/AppIcon.iconset -o Resources/AppIcon.icns
 
 # Universal, Developer ID signed, notarized and stapled zip in build/.
-release:
+release: $(DEPS)
 	swift build -c release --arch arm64 --arch x86_64
 	@$(MAKE) --no-print-directory bundle BIN="$$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/$(APP_NAME)"
 	codesign --force --timestamp --options runtime --entitlements $(ENTITLEMENTS) --sign "$(SIGN_IDENTITY)" $(APP)

@@ -1,14 +1,17 @@
 import AppKit
 import AVFoundation
 
+/// Window, menus and source selection. AirPlay is the main path; a USB-connected
+/// device is used only while nothing mirrors over AirPlay.
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
-    private enum Zoom { case fit, points, pixels }
+    private enum Zoom { case fit, actual, pixels }
 
+    private let airplay = AirPlayReceiver(name: "VibeMirror")
     private let monitor = DeviceMonitor()
     private let frameView = DeviceFrameView(frame: NSRect(x: 0, y: 0, width: 300, height: 620))
     private var window: NSWindow!
-    private var session: MirrorSession?
-    private var accessGranted = false
+    private var usbSession: MirrorSession?
+    private var airplayError: String?
     private let deviceMenu = NSMenu(title: "Device")
 
     private let topInset: CGFloat = 28
@@ -16,22 +19,37 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private let muteKey = "muted"
     private let floatKey = "keepOnTop"
 
+    private var isMuted: Bool { UserDefaults.standard.bool(forKey: muteKey) }
+    private var isAirPlayMirroring: Bool {
+        if case .mirroring = airplay.state { return true }
+        return false
+    }
+
     // MARK: Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         buildWindow()
-        frameView.message = "Looking for devices…"
 
-        monitor.onChange = { [weak self] _ in self?.devicesChanged() }
-        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.accessGranted = granted
-                self.monitor.refresh()
-                self.devicesChanged()
-            }
+        airplay.audio.isMuted = isMuted
+        airplay.video.onSizeChange = { [weak self] size in
+            guard let self, self.isAirPlayMirroring else { return }
+            self.screenSizeChanged(size)
         }
+        airplay.onStateChange = { [weak self] _ in self?.sourcesChanged() }
+        do {
+            try airplay.start()
+        } catch {
+            airplayError = error.localizedDescription
+        }
+
+        monitor.onChange = { [weak self] _ in self?.usbDevicesChanged() }
+        monitor.refresh()
+        sourcesChanged()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        airplay.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -87,10 +105,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case .fit:
             let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
             pointsPerPixel = min((visible.height * 0.85 - topInset) / g.bounds.height, visible.width * 0.85 / g.bounds.width)
-        case .points:
-            pointsPerPixel = 1 / Self.deviceScale(for: g)
+        case .actual:
+            // AirPlay streams are scaled, so size by the typical screen width in points.
+            let points: CGFloat = g.kind == .tablet ? 820 : 402
+            pointsPerPixel = points / g.screenShortSide
         case .pixels:
-            pointsPerPixel = 1 / (window.backingScaleFactor)
+            pointsPerPixel = 1 / window.backingScaleFactor
         }
         resizeWindow(pointsPerPixel: pointsPerPixel)
     }
@@ -108,86 +128,102 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         window.setFrame(frame, display: true, animate: false)
     }
 
-    private static func deviceScale(for g: DeviceGeometry) -> CGFloat {
-        let short = min(g.screenSize.width, g.screenSize.height)
-        return g.kind != .tablet && short >= 1080 ? 3 : 2
-    }
-
-    // MARK: Devices
-
-    private func devicesChanged() {
-        rebuildDeviceMenu()
-        guard accessGranted else {
-            show(message: "Camera access is off.\n\nmacOS treats a connected iPhone like a camera. Allow VibeMirror under System Settings → Privacy & Security → Camera, then reopen the app.")
-            return
-        }
-
-        let devices = monitor.devices
-        if let current = session?.device, devices.contains(where: { $0.uniqueID == current.uniqueID }) { return }
-        stopSession()
-
-        let preferred = UserDefaults.standard.string(forKey: selectedDeviceKey)
-        if let device = devices.first(where: { $0.uniqueID == preferred }) ?? devices.first {
-            startSession(with: device)
-        } else {
-            show(message: "Connect your iPhone with a USB cable.\n\nUnlock it and tap Trust if it asks. The screen shows up here a few seconds later.")
-        }
-    }
-
-    private func startSession(with device: AVCaptureDevice) {
-        stopSession()
-        do {
-            let session = try MirrorSession(device: device)
-            session.isMuted = UserDefaults.standard.bool(forKey: muteKey)
-            session.onScreenSizeChange = { [weak self] size in self?.screenSizeChanged(size) }
-            self.session = session
-            frameView.previewLayer = session.previewLayer
-            window.title = device.localizedName
-            UserDefaults.standard.set(device.uniqueID, forKey: selectedDeviceKey)
-            session.start()
-        } catch {
-            show(message: error.localizedDescription)
-        }
-        rebuildDeviceMenu()
-    }
-
-    private func stopSession() {
-        session = nil
-        frameView.previewLayer = nil
-        window.title = "VibeMirror"
-    }
-
-    private func show(message: String) {
-        frameView.message = message
-    }
-
     private func screenSizeChanged(_ size: CGSize) {
         let old = frameView.geometry
         let new = DeviceGeometry(screenSize: size)
         guard new != old else { return }
-        // Keep the on-screen scale; on rotation the window swaps its proportions.
-        let pointsPerPixel = old.fitScale(in: frameView.bounds.size)
+        // Keep the on-screen size; on rotation the window swaps its proportions.
+        let pointsPerPixel = old.fitScale(in: frameView.bounds.size) * old.screenShortSide / new.screenShortSide
         frameView.geometry = new
         resizeWindow(pointsPerPixel: pointsPerPixel)
+    }
+
+    // MARK: Sources
+
+    private func sourcesChanged() {
+        rebuildDeviceMenu()
+
+        if case .mirroring(let client) = airplay.state {
+            usbSession = nil
+            frameView.contentLayer = airplay.video.layer
+            window.title = client
+            return
+        }
+        if let usbSession {
+            frameView.contentLayer = usbSession.previewLayer
+            window.title = usbSession.device.localizedName
+            return
+        }
+
+        frameView.contentLayer = nil
+        window.title = "VibeMirror"
+        if let airplayError {
+            frameView.message = airplayError
+        } else if case .connected(let client) = airplay.state {
+            frameView.message = "\(client) is connecting…"
+        } else {
+            frameView.message = "On your iPhone, open Control Center, tap Screen Mirroring and choose \"\(airplay.name)\".\n\niPhone and Mac need to be on the same Wi-Fi."
+        }
+    }
+
+    private func usbDevicesChanged() {
+        if let current = usbSession?.device, !monitor.devices.contains(where: { $0.uniqueID == current.uniqueID }) {
+            usbSession = nil
+        }
+        guard usbSession == nil, !isAirPlayMirroring else { return sourcesChanged() }
+
+        let preferred = UserDefaults.standard.string(forKey: selectedDeviceKey)
+        if let device = monitor.devices.first(where: { $0.uniqueID == preferred }) ?? monitor.devices.first {
+            startUSB(device)
+        } else {
+            sourcesChanged()
+        }
+    }
+
+    /// macOS files a USB iPhone under cameras, so the permission is asked only once one is plugged in.
+    private func startUSB(_ device: AVCaptureDevice) {
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard granted else {
+                    self.frameView.message = "Camera access is off.\n\nmacOS treats a USB iPhone like a camera. Allow VibeMirror under System Settings → Privacy & Security → Camera."
+                    return
+                }
+                do {
+                    let session = try MirrorSession(device: device)
+                    session.isMuted = self.isMuted
+                    session.onScreenSizeChange = { [weak self] size in
+                        guard let self, self.usbSession === session, !self.isAirPlayMirroring else { return }
+                        self.screenSizeChanged(size)
+                    }
+                    self.usbSession = session
+                    UserDefaults.standard.set(device.uniqueID, forKey: self.selectedDeviceKey)
+                    session.start()
+                } catch {
+                    self.frameView.message = error.localizedDescription
+                }
+                self.sourcesChanged()
+            }
+        }
     }
 
     // MARK: Actions
 
     @objc private func selectDevice(_ sender: NSMenuItem) {
         guard let device = sender.representedObject as? AVCaptureDevice else { return }
-        startSession(with: device)
+        usbSession = nil
+        startUSB(device)
     }
 
     @objc private func refreshDevices(_ sender: Any?) {
         DeviceMonitor.allowScreenCaptureDevices()
         monitor.refresh()
-        devicesChanged()
+        usbDevicesChanged()
     }
 
     @objc private func saveScreenshot(_ sender: Any?) {
-        guard let session else { NSSound.beep(); return }
-        let name = session.device.localizedName
-        session.captureFrame { image in
+        let name = window.title
+        let handler: (CGImage?) -> Void = { image in
             guard let image else { NSSound.beep(); return }
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
@@ -203,10 +239,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 NSAlert(error: error).runModal()
             }
         }
+        if isAirPlayMirroring {
+            airplay.video.captureFrame(handler)
+        } else if let usbSession {
+            usbSession.captureFrame(handler)
+        } else {
+            NSSound.beep()
+        }
     }
 
     @objc private func zoomFit(_ sender: Any?) { apply(zoom: .fit) }
-    @objc private func zoomPoints(_ sender: Any?) { apply(zoom: .points) }
+    @objc private func zoomActual(_ sender: Any?) { apply(zoom: .actual) }
     @objc private func zoomPixels(_ sender: Any?) { apply(zoom: .pixels) }
 
     @objc private func toggleKeepOnTop(_ sender: Any?) {
@@ -216,9 +259,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc private func toggleMute(_ sender: Any?) {
-        let muted = !UserDefaults.standard.bool(forKey: muteKey)
+        let muted = !isMuted
         UserDefaults.standard.set(muted, forKey: muteKey)
-        session?.isMuted = muted
+        usbSession?.isMuted = muted
+        airplay.audio.isMuted = muted
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -226,9 +270,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case #selector(toggleKeepOnTop(_:)):
             item.state = UserDefaults.standard.bool(forKey: floatKey) ? .on : .off
         case #selector(toggleMute(_:)):
-            item.state = UserDefaults.standard.bool(forKey: muteKey) ? .on : .off
+            item.state = isMuted ? .on : .off
         case #selector(saveScreenshot(_:)):
-            return session != nil
+            return isAirPlayMirroring || usbSession != nil
         default:
             break
         }
@@ -257,7 +301,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         let view = NSMenu(title: "Window")
         view.addItem(item("Fit Screen", #selector(zoomFit(_:)), "1"))
-        view.addItem(item("Point Accurate", #selector(zoomPoints(_:)), "2"))
+        view.addItem(item("Actual Size", #selector(zoomActual(_:)), "2"))
         view.addItem(item("Pixel Accurate", #selector(zoomPixels(_:)), "3"))
         view.addItem(.separator())
         let onTop = item("Keep on Top", #selector(toggleKeepOnTop(_:)), "t")
@@ -277,19 +321,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private func rebuildDeviceMenu() {
         deviceMenu.removeAllItems()
+
+        let airplayTitle: String
+        switch airplay.state {
+        case .mirroring(let client): airplayTitle = "AirPlay: \(client)"
+        case .connected(let client): airplayTitle = "AirPlay: \(client) connecting"
+        case .waiting: airplayTitle = "AirPlay: waiting as \"\(airplay.name)\""
+        case .stopped: airplayTitle = "AirPlay: off"
+        }
+        let airplayItem = NSMenuItem(title: airplayTitle, action: nil, keyEquivalent: "")
+        airplayItem.isEnabled = false
+        airplayItem.state = isAirPlayMirroring ? .on : .off
+        deviceMenu.addItem(airplayItem)
+
+        deviceMenu.addItem(.separator())
         if monitor.devices.isEmpty {
-            let empty = NSMenuItem(title: "No Devices Connected", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: "No USB Devices", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             deviceMenu.addItem(empty)
         }
         for device in monitor.devices {
-            let entry = item(device.localizedName, #selector(selectDevice(_:)), "")
+            let entry = item("USB: \(device.localizedName)", #selector(selectDevice(_:)), "")
             entry.representedObject = device
-            entry.state = device.uniqueID == session?.device.uniqueID ? .on : .off
+            entry.state = !isAirPlayMirroring && device.uniqueID == usbSession?.device.uniqueID ? .on : .off
             deviceMenu.addItem(entry)
         }
         deviceMenu.addItem(.separator())
-        deviceMenu.addItem(item("Refresh Devices", #selector(refreshDevices(_:)), "r"))
+        deviceMenu.addItem(item("Refresh USB Devices", #selector(refreshDevices(_:)), "r"))
     }
 
     private func item(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {

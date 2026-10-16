@@ -10,6 +10,12 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ hashFiles('scripts/build-deps.sh') }}
+      - name: Build dependencies
+        run: make deps
       - name: Build app bundle
         run: make app
       - name: Universal release build
